@@ -1,57 +1,71 @@
 #!/usr/bin/env python3
-'''
+"""
 Module Docstring
-'''
+"""
 
-__author__ = 'Lorenzo Bernardi'
-__version__ = '0.1.0'
-__license__ = 'MIT'
+__author__ = "Lorenzo Bernardi"
+__version__ = "0.1.0"
+__license__ = "MIT"
 
-import sys
-import os
-import getopt
-import requests
-import datetime
 import csv
-import traceback
+import datetime
+import getopt
+import os
 import socket
+import sys
+import traceback
+
 import psycopg2
 import psycopg2.extras
+import requests
 
-from pprint import pprint
 
 def print_usage():
-    print('Usage: ./osintct.py -d|--domain DOMAIN [-r|--resolve] [-o|--output FILENAME]')
-    print('--domain: domain name to check for (use TLD)')
-    print('--resolve: try resolving IP addresses for subdomains found (can take some time)')
-    print('--output: output file (CSV format) - default: output.csv')
+    """Print usage"""
+    print(
+        "Usage: ./osintct.py -d|--domain DOMAIN [-r|--resolve] [-o|--output FILENAME]"
+    )
+    print("--domain: domain name to check for (use TLD)")
+    print(
+        "--resolve: try resolving IP addresses for subdomains found (can take some time)"
+    )
+    print("--output: output file (CSV format) - default: output.csv")
+
 
 def check_domain(domain, resolve, output):
-    print('Checking domain: %s' % domain)
+    """Main entry point of the app"""
+    print(f"Checking domain: {domain}")
     results_crtsh = check_domain_crtsh(domain)
     results_fb = check_domain_fb(domain)
 
-    results_all = {
-        'crt.sh': results_crtsh,
-        'Facebook CT': results_fb['data']
-    }
+    results_all = {"crt.sh": results_crtsh, "Facebook CT": results_fb["data"]}
     results = parse_results(results_all)
     if resolve:
-        print('Resolving domain names to IP addresses')
-    for d in results:
+        print("Resolving domain names to IP addresses")
+    for (domain_name, domain_info) in results.items():
         if resolve:
             try:
-                ips = '\n'.join(list({addr[-1][0] for addr in socket.getaddrinfo(d, 0, 0, 0, 0)}))
-            except Exception as e:
-                ips = 'not found'
+                ip_addresses = "\n".join(
+                    list(
+                        {
+                            addr[-1][0]
+                            for addr in socket.getaddrinfo(domain_name, 0, 0, 0, 0)
+                        }
+                    )
+                )
+            # pylint: disable=broad-except
+            except Exception:
+                ip_addresses = "not found"
         else:
-            ips = 'not checked'
-        results[d]['resolved_ips'] = ips
+            ip_addresses = "not checked"
+        domain_info["resolved_ips"] = ip_addresses
 
     export_results(results, output)
 
+
 def check_domain_crtsh(domain):
-    print('Checking domain [%s] on crt.sh' % domain)
+    """Check domain on crt.sh"""
+    print(f"Checking domain [{domain}] on crt.sh")
 
     conn_string = "host='crt.sh' dbname='certwatch' user='guest'"
 
@@ -59,21 +73,21 @@ def check_domain_crtsh(domain):
     conn.set_session(autocommit=True)
     cursor = conn.cursor(cursor_factory=psycopg2.extras.NamedTupleCursor)
 
-    query = '''
+    query = """
     WITH ci AS (
     SELECT min(sub.CERTIFICATE_ID) ID,
-           min(sub.ISSUER_CA_ID) ISSUER_CA_ID,
-           array_agg(DISTINCT sub.NAME_VALUE) NAME_VALUES,
-           x509_commonName(sub.CERTIFICATE) COMMON_NAME,
-           x509_notBefore(sub.CERTIFICATE) NOT_VALID_BEFORE,
-           x509_notAfter(sub.CERTIFICATE) NOT_VALID_AFTER,
-           digest(sub.CERTIFICATE, 'sha256'::text) CERT_HASH_SHA256
+            min(sub.ISSUER_CA_ID) ISSUER_CA_ID,
+            array_agg(DISTINCT sub.NAME_VALUE) NAME_VALUES,
+            x509_commonName(sub.CERTIFICATE) COMMON_NAME,
+            x509_notBefore(sub.CERTIFICATE) NOT_VALID_BEFORE,
+            x509_notAfter(sub.CERTIFICATE) NOT_VALID_AFTER,
+            digest(sub.CERTIFICATE, 'sha256'::text) CERT_HASH_SHA256
         FROM (SELECT *
-                  FROM certificate_and_identities cai
-                  WHERE plainto_tsquery('certwatch', '{0}') @@ identities(cai.CERTIFICATE)
-                      AND cai.NAME_VALUE ILIKE ('%' || '{0}' || '%')
-                  LIMIT 10000
-             ) sub
+                FROM certificate_and_identities cai
+                WHERE plainto_tsquery('certwatch', '{0}') @@ identities(cai.CERTIFICATE)
+                    AND cai.NAME_VALUE ILIKE ('%' || '{0}' || '%')
+                LIMIT 10000
+            ) sub
         GROUP BY sub.CERTIFICATE
     )
     SELECT ci.ISSUER_CA_ID,
@@ -91,137 +105,174 @@ def check_domain_crtsh(domain):
                     FROM ct_log_entry ctle
                     WHERE ctle.CERTIFICATE_ID = ci.ID
             ) le ON TRUE,
-         ca
+        ca
     WHERE ci.ISSUER_CA_ID = ca.ID
     ORDER BY le.ENTRY_TIMESTAMP DESC NULLS LAST;
-    '''
+    """
 
     cursor.execute(query.format(domain))
 
     domains = []
-    for r in cursor:
-        domains.append({
-            'domains': [ r.common_name ],
-            'not_valid_after': r.not_valid_after.replace(tzinfo=datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S%z'),
-            'not_valid_before': r.not_valid_before.replace(tzinfo=datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S%z'),
-            'cert_hash_sha256': r.cert_hash_sha256.hex(),
-            'issuer_name': r.issuer_name,
-        })
+    for result in cursor:
+        domains.append(
+            {
+                "domains": [result.common_name],
+                "not_valid_after": result.not_valid_after.replace(
+                    tzinfo=datetime.timezone.utc
+                ).strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "not_valid_before": result.not_valid_before.replace(
+                    tzinfo=datetime.timezone.utc
+                ).strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "cert_hash_sha256": result.cert_hash_sha256.hex(),
+                "issuer_name": result.issuer_name,
+            }
+        )
 
     return domains
 
+
 def check_domain_fb(domain):
-    print('Checking domain [%s] on Facebook CT' % domain)
-    access_token = os.getenv('FB_ACCESS_TOKEN')
+    """Check domain on Facebook CT"""
+    print(f"Checking domain [{domain}] on Facebook CT")
+    access_token = os.getenv("FB_ACCESS_TOKEN")
     limit = 20000
     try:
-        res = requests.get('https://graph.facebook.com/certificates?query=%s&access_token=%s&limit=%d&fields=cert_hash_sha256,domains,issuer_name,not_valid_after,not_valid_before' % (domain, access_token, limit))
+        # pylint: disable=line-too-long
+        res = requests.get(
+            f"https://graph.facebook.com/certificates?query={domain}&access_token={access_token}&limit={limit}&fields=cert_hash_sha256,domains,issuer_name,not_valid_after,not_valid_before",
+            timeout=60,
+        )
 
         if res.status_code != 200:
-            print('Error getting certificates from Facebook CT: %s' % res.text)
-        else:
-            return res.json()
-            # fb_results = parse_fb_results(res.json())
-            # return fb_results
-    except Exception as e:
-        print('Error getting certificates from Facebook CT: %s' % e)
+            print(f"Error getting certificates from Facebook CT: {res.text}")
+            return {}
+
+        return res.json()
+
+    # pylint: disable=broad-except
+    except Exception as err:
+        print(f"Error getting certificates from Facebook CT: {err}")
         traceback.print_exc()
+        return {}
+
 
 def export_results(results, output):
-    csv_columns = ['domain','first_time_seen','not_valid_before','not_valid_after','last_issuer', 'is_expired', 'resolved_ips', 'found_in']
+    """Export results to CSV file"""
+    csv_columns = [
+        "domain",
+        "first_time_seen",
+        "not_valid_before",
+        "not_valid_after",
+        "last_issuer",
+        "is_expired",
+        "resolved_ips",
+        "found_in",
+    ]
     to_print = []
-    for d in results:
-        tmp = results[d]
-        del tmp['first_issuer']
-        del tmp['issuers']
-        del tmp['hash_history']
-        del tmp['current_hash']
-        tmp['first_time_seen'] = tmp['first_time_seen'].strftime("%Y-%m-%d %H:%M")
-        tmp['not_valid_before'] = tmp['not_valid_before'].strftime("%Y-%m-%d %H:%M")
-        tmp['not_valid_after'] = tmp['not_valid_after'].strftime("%Y-%m-%d %H:%M")
-        tmp['domain'] = d
-        tmp['found_in'] = '/'.join(tmp['found_in'])
+    for domain in results:
+        tmp = results[domain]
+        del tmp["first_issuer"]
+        del tmp["issuers"]
+        del tmp["hash_history"]
+        del tmp["current_hash"]
+        tmp["first_time_seen"] = tmp["first_time_seen"].strftime("%Y-%m-%d %H:%M")
+        tmp["not_valid_before"] = tmp["not_valid_before"].strftime("%Y-%m-%d %H:%M")
+        tmp["not_valid_after"] = tmp["not_valid_after"].strftime("%Y-%m-%d %H:%M")
+        tmp["domain"] = domain
+        tmp["found_in"] = "/".join(tmp["found_in"])
         to_print.append(tmp)
 
     try:
-        with open(output, 'w') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=csv_columns, delimiter=';')
+        with open(output, "w", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=csv_columns, delimiter=";")
             writer.writeheader()
             for data in to_print:
                 writer.writerow(data)
-        print('Results saved to %s' % output)
+        print(f"Results saved to {output}")
     except IOError:
-        print('I/O error')
+        print("I/O error")
+
 
 def parse_results(results):
+    """Parse results"""
     domains = {}
     for provider in results:
-        print('Parsing results from %s: %d' % (provider, len(results[provider])))
+        print(f"Parsing results from {provider}: {len(results[provider])}")
         for res in results[provider]:
-            not_valid_after = datetime.datetime.strptime(res['not_valid_after'], '%Y-%m-%dT%H:%M:%S%z')
-            not_valid_before = datetime.datetime.strptime(res['not_valid_before'], '%Y-%m-%dT%H:%M:%S%z')
+            not_valid_after = datetime.datetime.strptime(
+                res["not_valid_after"], "%Y-%m-%dT%H:%M:%S%z"
+            )
+            not_valid_before = datetime.datetime.strptime(
+                res["not_valid_before"], "%Y-%m-%dT%H:%M:%S%z"
+            )
 
-            for d in res['domains']:
-                if d in domains:
-                    if domains[d]['first_time_seen'] > not_valid_before:
-                        domains[d]['first_time_seen'] = not_valid_before
-                        domains[d]['first_issuer'] = res['issuer_name']
+            for domain in res["domains"]:
+                if domain in domains:
+                    if domains[domain]["first_time_seen"] > not_valid_before:
+                        domains[domain]["first_time_seen"] = not_valid_before
+                        domains[domain]["first_issuer"] = res["issuer_name"]
 
-                    if domains[d]['not_valid_after'] < not_valid_after:
-                        domains[d]['not_valid_after'] = not_valid_after
-                        domains[d]['not_valid_before'] = not_valid_before
-                        domains[d]['last_issuer'] = res['issuer_name']
-                        domains[d]['current_hash'] = res['cert_hash_sha256']
-                        domains[d]['is_expired'] = not_valid_after < datetime.datetime.now(not_valid_after.tzinfo)
+                    if domains[domain]["not_valid_after"] < not_valid_after:
+                        domains[domain]["not_valid_after"] = not_valid_after
+                        domains[domain]["not_valid_before"] = not_valid_before
+                        domains[domain]["last_issuer"] = res["issuer_name"]
+                        domains[domain]["current_hash"] = res["cert_hash_sha256"]
+                        domains[domain][
+                            "is_expired"
+                        ] = not_valid_after < datetime.datetime.now(
+                            not_valid_after.tzinfo
+                        )
 
-                    if res['issuer_name'] not in domains[d]['issuers']:
-                        domains[d]['issuers'].append(res['issuer_name'])
+                    if res["issuer_name"] not in domains[domain]["issuers"]:
+                        domains[domain]["issuers"].append(res["issuer_name"])
 
-                    if res['cert_hash_sha256'] not in domains[d]['hash_history']:
-                        domains[d]['hash_history'].append(res['cert_hash_sha256'])
+                    if res["cert_hash_sha256"] not in domains[domain]["hash_history"]:
+                        domains[domain]["hash_history"].append(res["cert_hash_sha256"])
 
-                    if provider not in domains[d]['found_in']:
-                        domains[d]['found_in'].append(provider)
+                    if provider not in domains[domain]["found_in"]:
+                        domains[domain]["found_in"].append(provider)
 
                 else:
-                    domains[d] = {
-                        'first_time_seen': not_valid_before,
-                        'not_valid_after': not_valid_after,
-                        'not_valid_before': not_valid_before,
-                        'hash_history': [ res['cert_hash_sha256'] ],
-                        'current_hash': res['cert_hash_sha256'],
-                        'first_issuer': res['issuer_name'],
-                        'last_issuer': res['issuer_name'],
-                        'issuers': [ res['issuer_name'] ],
-                        'is_expired': not_valid_after < datetime.datetime.now(not_valid_after.tzinfo),
-                        'found_in': [ provider ]
+                    domains[domain] = {
+                        "first_time_seen": not_valid_before,
+                        "not_valid_after": not_valid_after,
+                        "not_valid_before": not_valid_before,
+                        "hash_history": [res["cert_hash_sha256"]],
+                        "current_hash": res["cert_hash_sha256"],
+                        "first_issuer": res["issuer_name"],
+                        "last_issuer": res["issuer_name"],
+                        "issuers": [res["issuer_name"]],
+                        "is_expired": not_valid_after
+                        < datetime.datetime.now(not_valid_after.tzinfo),
+                        "found_in": [provider],
                     }
-    print('Identified %d unique sub-domains' % len(domains))
+    print(f"Identified {len(domains)} unique sub-domains")
     return domains
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
 
-    domain = None
-    resolve = False
-    output = 'output.csv'
+    DOMAIN = None
+    RESOLVE = False
+    OUTPUT = "output.csv"
 
     argv = sys.argv[1:]
     try:
-        opts, args = getopt.getopt(argv, 'd:ro:', ['domain=', 'resolve', 'output='])
-    except:
-        print('Error parsing arguments')
+        opts, args = getopt.getopt(argv, "d:ro:", ["domain=", "resolve", "output="])
+    # pylint: disable=broad-except
+    except Exception:
+        print("Error parsing arguments")
 
     for opt, arg in opts:
-        if opt in ['-d', '--domain']:
-            domain = arg
-        elif opt in ['-r', '--resolve']:
-            resolve = True
-        elif opt in ['-o', '--output']:
-            output = arg
+        if opt in ["-d", "--domain"]:
+            DOMAIN = arg
+        elif opt in ["-r", "--resolve"]:
+            RESOLVE = True
+        elif opt in ["-o", "--output"]:
+            OUTPUT = arg
 
-    if not domain:
+    if not DOMAIN:
         print_usage()
         sys.exit(2)
 
-    check_domain(domain, resolve, output)
+    check_domain(DOMAIN, RESOLVE, OUTPUT)
